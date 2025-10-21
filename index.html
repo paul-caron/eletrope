@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: black;
+        }
+        canvas {
+            max-width: 100%;
+        }
+        #log {
+            z-index: 2;
+            position: absolute;
+            top: 0;
+            left: 0;
+            color: white;
+            padding: 10px;
+        }
+        #progress-container {
+            width: 200px; /* Adjust width as needed */
+            height: 20px;
+            background-color: #333;
+            border: 1px solid #fff;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        #progress-bar {
+            height: 100%;
+            width: 0%; /* Initial width */
+            background-color: #4caf50; /* Green color for progress */
+            transition: width 0.3s ease-in-out; /* Smooth transition */
+        }
+        #progress-text {
+            margin-top: 5px;
+            font-family: Arial, sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div id="log">
+        <div id="progress-container">
+            <div id="progress-bar"></div>
+        </div>
+        <div id="progress-text">0/10</div>
+    </div>
+    <!-- dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/2.8.1/gl-matrix-min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/paul-caron/EpicCanvas@v2.0.0/epiccanvas.js" crossorigin='anonymous'></script>
+    
+    <script src="https://cdn.jsdelivr.net/gh/paul-caron/EpicCanvas@v2.0.0/shaders/fragmentPhong.js" crossorigin='anonymous'></script>
+    <script src="https://cdn.jsdelivr.net/gh/paul-caron/EpicCanvas@v2.0.0/shaders/vertexPhong.js" crossorigin='anonymous'></script>
+
+    <script>    
+        // globals
+        let model, ec, program, models = [], log, loadedCount = 0;
+
+        function renderLoop(t) {
+            let i = Math.floor(t / 80) % 10;
+            const d = 2;
+            ec.clearScreen();
+            ec.drawShape(program, models[i]);
+            ec.lookAt([Math.cos(t / 2000) * d, 0, Math.sin(t / 2000) * d], [0, 0, 0], [0, 1, 0]);
+            ec.directionalVector = vec3.normalize([], ec.cameraPosition);
+            requestAnimationFrame(renderLoop);
+        }
+
+        const main = async () => {
+            try {
+                log = document.querySelector("#log");
+                const progressBar = document.querySelector("#progress-bar");
+                const progressText = document.querySelector("#progress-text");
+                const size = (innerWidth < innerHeight) ? innerWidth : innerHeight;
+                // create canvas
+                const width = size;
+                const height = size;
+                ec = new EpicCanvas(width, height, "body");
+
+                // set clear color 
+                ec.clearColor = [0.2, 0.4, 0.5, 1.0];
+
+                // setup the camera position, lookat center point, up vector.
+                ec.lookAt([0, 0, 5], [0, 0, 0], [0, 1, 0]);
+                ec.fieldOfView = Math.PI / 3;
+                ec.aspectRatio = width / height;
+
+                // create shader program
+                program = ec.makeProgram(vsPhong, fsPhong);
+
+                // setup some lighting of 3 types
+                ec.ambientColor = [0.25, 0.25, 0.25];
+                ec.directionalColor = [0.75, 0.75, 0.75];
+                ec.directionalVector = [-0.7, 0.7, 0]; // direction the light comes from, should be normalized
+
+                const numbers = Array.from({ length: 10 }, (_, i) => (i + 1).toString().padStart(2, '0'));
+                const url = "https://raw.githubusercontent.com/paul-caron/eletrope/master/model/ee";
+
+                // Update log with initial loading state
+                progressText.textContent = "0/10";
+                progressBar.style.width = "0%";
+
+                const modelPromises = numbers.map((n, i) =>
+                    ec.loadSTL(url + n + ".STL").then(model => {
+                        scaleToUnitSize(model);
+                        rotateX(model, -Math.PI / 2);
+                        translateY(model, -0.4);
+                        setColor(model, [0.7,0.7,0.7,1.0])
+                        ec.reloadBufferData(model);
+                        // Store model at correct index
+                        models[i] = model;
+                        // Update loaded count, progress bar, and text
+                        loadedCount++;
+                        progressText.textContent = `${loadedCount}/10`;
+                        progressBar.style.width = `${(loadedCount / 10) * 100}%`;
+                    })
+                );
+                
+                await Promise.all(modelPromises);
+                // Optionally clear the log div after loading
+                log.style.display = "none"; // Hide progress bar when done
+                requestAnimationFrame(renderLoop);
+                
+            } catch (e) {
+                alert("error in main: " + e);
+            }
+        }
+
+        onload = main;
+    </script>
+</body>
+</html>
