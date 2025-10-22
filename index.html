@@ -22,7 +22,7 @@
             padding: 10px;
         }
         #progress-container {
-            width: 200px; /* Adjust width as needed */
+            width: 200px;
             height: 20px;
             background-color: #333;
             border: 1px solid #fff;
@@ -54,18 +54,313 @@
     
     <script src="https://cdn.jsdelivr.net/gh/paul-caron/EpicCanvas@v2.0.0/shaders/fragmentPhong.js" crossorigin='anonymous'></script>
     <script src="https://cdn.jsdelivr.net/gh/paul-caron/EpicCanvas@v2.0.0/shaders/vertexPhong.js" crossorigin='anonymous'></script>
+    <script src="https://cdn.jsdelivr.net/gh/paul-caron/EpicCanvas@v2.0.0/primitives/square.js" crossorigin='anonymous'></script>
 
     <script>    
         // globals
-        let model, ec, program, models = [], log, loadedCount = 0;
+        let ec, program, elephants = [], log, loadedCount = 0, prevTime = 0, ground;
+
+        class Elephant {
+            constructor(frames) {
+                this.frames = frames;
+                this.currentFrameIndex = 0;
+                this.modelMatrix = mat4.create();
+                this.normalMatrix = mat4.create();
+                this.speed = 1.0; // Animation speed multiplier
+                this.position = [0, 0, 0]; // Elephant's world position
+                this.rotation = 0; // Elephant's rotation (e.g., around Y-axis)
+                this.scale = [1, 1, 1];
+                this.velocity = vec3.fromValues((Math.random() - 0.5) * 0.2, 0, (Math.random() - 0.5) * 0.2); // Initial random velocity
+                this.maxSpeed = 1.0; // Units per second
+                this.maxForce = 0.05;
+                this.perceptionRadius = 2.0;
+                this.separationRadius = 1.0; 
+                this.separationWeight = 4.5; 
+                this.alignmentWeight = 1.0;
+                this.cohesionWeight = 0.8; 
+                this.oasisWeight = 0.5 
+                // Stamina properties
+                this.maxStamina = 50 + Math.random() * 50; // Random stamina between 50 and 100
+                this.stamina = this.maxStamina; // Start at full stamina
+                this.isResting = false; // Not resting initially
+                this.staminaDrainRate = 5.0; // Stamina units per second per unit speed
+                this.staminaRechargeRate = 25.0; // Stamina units per second
+                this.rechargeThreshold = this.maxStamina ; // Resume walking at 100% stamina
+                this.updateMatrices(); // Initialize matrices
+            }
+
+            update(timeDelta) {
+                // Update animation frame only if not resting
+                if (!this.isResting) {
+                    this.currentFrameIndex = (Math.floor(timeDelta / 100)) % this.frames.length;
+                }
+            }
+
+            simulate(flock, deltaTime) {
+                deltaTime /= 1000; // Convert ms to seconds
+
+                // Update stamina
+                if (!this.isResting) {
+                    // Drain stamina based on movement speed
+                    const speed = vec3.length(this.velocity);
+                    this.stamina -= speed * this.staminaDrainRate * deltaTime;
+                    if (this.stamina <= 0) {
+                        this.stamina = 0;
+                        this.isResting = true;
+                        vec3.set(this.velocity, 0, 0, 0); // Stop movement
+                    }
+                } else {
+                    // Recharge stamina
+                    this.stamina += this.staminaRechargeRate * deltaTime;
+                    if (this.stamina >= this.rechargeThreshold) {
+                        this.isResting = false;
+                        // Give a small random velocity to resume movement
+                        vec3.set(this.velocity, (Math.random() - 0.5) * 0.1, 0, (Math.random() - 0.5) * 0.1);
+                    }
+                }
+
+                // Skip movement and rotation if resting
+                if (this.isResting) {
+                    this.updateMatrices();
+                    return;
+                }
+
+                const separation = this.computeSeparation(flock);
+                const alignment = this.computeAlignment(flock);
+                const cohesion = this.computeCohesion(flock);
+                const oasis = this.computeOasis();
+
+                vec3.scale(separation, separation, this.separationWeight);
+                vec3.scale(alignment, alignment, this.alignmentWeight);
+                vec3.scale(cohesion, cohesion, this.cohesionWeight);
+                vec3.scale(oasis, oasis, this.oasisWeight);
+
+                const force = vec3.create();
+                vec3.add(force, force, separation);
+                vec3.add(force, force, alignment);
+                vec3.add(force, force, cohesion);
+                vec3.add(force, force, oasis);
+
+                // Limit force
+                const forceLen = vec3.length(force);
+                if (forceLen > this.maxForce) {
+                    vec3.scale(force, force, this.maxForce / forceLen);
+                }
+
+                // Update velocity
+                vec3.scaleAndAdd(this.velocity, this.velocity, force, deltaTime);
+
+                // Limit speed
+                const velLen = vec3.length(this.velocity);
+                if (velLen > this.maxSpeed) {
+                    vec3.scale(this.velocity, this.velocity, this.maxSpeed / velLen);
+                }
+
+                // Update position
+                vec3.scaleAndAdd(this.position, this.position, this.velocity, deltaTime);
+
+                // Update rotation to face velocity direction (in XZ plane)
+                if (velLen > 0) {
+                    this.rotation = Math.atan2(this.velocity[2], this.velocity[0]);
+                }
+
+                this.updateMatrices();
+            }
+
+            getNeighbors(flock) {
+                const neighbors = [];
+                for (let other of flock) {
+                    if (other !== this) {
+                        const dist = vec3.distance(this.position, other.position);
+                        if (dist < this.perceptionRadius) {
+                            neighbors.push({elephant: other, dist: dist});
+                        }
+                    }
+                }
+                return neighbors;
+            }
+
+            computeSeparation(flock) {
+                const steer = vec3.create();
+                let count = 0;
+                for (let other of flock) {
+                    if (other !== this) {
+                        const dist = vec3.distance(this.position, other.position);
+                        if (dist > 0 && dist < this.separationRadius) {
+                            const diff = vec3.create();
+                            vec3.subtract(diff, this.position, other.position);
+                            vec3.normalize(diff, diff);
+                            vec3.scale(diff, diff, 1 / dist); // Stronger repulsion if closer
+                            vec3.add(steer, steer, diff);
+                            count++;
+                        }
+                    }
+                }
+                if (count > 0) {
+                    vec3.scale(steer, steer, 1 / count);
+                    vec3.normalize(steer, steer);
+                    vec3.scale(steer, steer, this.maxSpeed);
+                    vec3.subtract(steer, steer, this.velocity);
+                }
+                return steer;
+            }
+
+            computeAlignment(flock) {
+                const steer = vec3.create();
+                const neighbors = this.getNeighbors(flock);
+                if (neighbors.length === 0) return steer;
+                let sum = vec3.create();
+                for (let neigh of neighbors) {
+                    vec3.add(sum, sum, neigh.elephant.velocity);
+                }
+                vec3.scale(sum, sum, 1 / neighbors.length);
+                vec3.normalize(sum, sum);
+                vec3.scale(sum, sum, this.maxSpeed);
+                vec3.subtract(steer, sum, this.velocity);
+                return steer;
+            }
+
+            computeCohesion(flock) {
+                const steer = vec3.create();
+                const neighbors = this.getNeighbors(flock);
+                if (neighbors.length === 0) return steer;
+                let sum = vec3.create();
+                for (let neigh of neighbors) {
+                    vec3.add(sum, sum, neigh.elephant.position);
+                }
+                vec3.scale(sum, sum, 1 / neighbors.length);
+                vec3.subtract(sum, sum, this.position);
+                vec3.normalize(sum, sum);
+                vec3.scale(sum, sum, this.maxSpeed);
+                vec3.subtract(steer, sum, this.velocity);
+                return steer;
+            }
+
+            computeOasis() {
+                const oasisPos = vec3.fromValues(0, 0, 0);
+                const steer = vec3.create();
+                const dir = vec3.create();
+                vec3.subtract(dir, oasisPos, this.position);
+                const dist = vec3.length(dir);
+                if (dist > 0) {
+                    vec3.normalize(dir, dir);
+                    vec3.scale(dir, dir, this.maxSpeed);
+                    vec3.subtract(steer, dir, this.velocity);
+                }
+                return steer;
+            }
+
+            updateMatrices() {
+                // Reset model matrix
+                mat4.identity(this.modelMatrix);
+
+                // Apply scale
+                let scaleMat = mat4.create();
+                mat4.scale(scaleMat, scaleMat, this.scale);
+
+                // Apply rotation (around Y-axis for turning)
+                let rotMat = mat4.create();
+                mat4.rotateY(rotMat, rotMat, Math.PI*2-this.rotation);
+
+                // Apply translation
+                let transMat = mat4.create();
+                mat4.translate(transMat, transMat, this.position);
+
+                // Combine: trans * rot * scale (for scale -> rotate -> translate order)
+                mat4.multiply(this.modelMatrix, rotMat, scaleMat); // rot * scale
+                mat4.multiply(this.modelMatrix, transMat, this.modelMatrix); // trans * (rot * scale)
+
+                // Compute normal matrix (inverse transpose of model matrix)
+                mat4.invert(this.normalMatrix, this.modelMatrix);
+                mat4.transpose(this.normalMatrix, this.normalMatrix);
+            }
+
+            // Method to draw this elephant with its instance matrices
+            draw(program) {
+                const frame = this.frames[this.currentFrameIndex];
+                
+                // Ensure matrices object exists
+                let createdMatrices = false;
+                if (!frame.matrices) {
+                    frame.matrices = {};
+                    createdMatrices = true;
+                }
+
+                // Backup original matrices if they exist
+                const origModel = frame.matrices.modelMatrix ? mat4.clone(frame.matrices.modelMatrix) : null;
+                const origNormal = frame.matrices.normalMatrix ? mat4.clone(frame.matrices.normalMatrix) : null;
+
+                // Set or create the matrices and copy instance values
+                if (!frame.matrices.modelMatrix) {
+                    frame.matrices.modelMatrix = mat4.create();
+                }
+                if (!frame.matrices.normalMatrix) {
+                    frame.matrices.normalMatrix = mat4.create();
+                }
+                mat4.copy(frame.matrices.modelMatrix, this.modelMatrix);
+                mat4.copy(frame.matrices.normalMatrix, this.normalMatrix);
+
+                // Draw the frame with updated matrices
+                ec.drawShape(program, frame);
+
+                // Restore original matrices
+                if (origModel) {
+                    mat4.copy(frame.matrices.modelMatrix, origModel);
+                } else {
+                    delete frame.matrices.modelMatrix;
+                }
+                if (origNormal) {
+                    mat4.copy(frame.matrices.normalMatrix, origNormal);
+                } else {
+                    delete frame.matrices.normalMatrix;
+                }
+                if (createdMatrices && Object.keys(frame.matrices).length === 0) {
+                    delete frame.matrices;
+                }
+            }
+
+            // Convenience methods to move/rotate the elephant
+            setPosition(pos) {
+                this.position = [...pos];
+                this.updateMatrices();
+            }
+
+            setRotation(angle) {
+                this.rotation = angle;
+                this.updateMatrices();
+            }
+
+            setScale(scl) {
+                this.scale = [...scl];
+                this.updateMatrices();
+            }
+        }
 
         function renderLoop(t) {
-            let i = Math.floor(t / 80) % 10;
-            const d = 2;
+            const [x,y,z] = elephants[0].position;
+            const angle = elephants[0].rotation;
+            const s = elephants[0].size * 1.05
+            const dx = Math.cos(angle)*1;
+            const dz = Math.sin(angle)*1;
+            ec.lookAt([x,s,z],[x+dx,s,z+dz],[0,1,0]);
+
+            const delta = t - prevTime;
+            prevTime = t;
+            if (delta > 0) {
+                elephants.forEach(elephant => {
+                    elephant.simulate(elephants, delta);
+                });
+            }
+
+            elephants.forEach(elephant => {
+                elephant.update(t * elephant.speed); // Per-elephant timeDelta with speed
+            });
+
             ec.clearScreen();
-            ec.drawShape(program, models[i]);
-            ec.lookAt([Math.cos(t / 2000) * d, 0, Math.sin(t / 2000) * d], [0, 0, 0], [0, 1, 0]);
-            ec.directionalVector = vec3.normalize([], ec.cameraPosition);
+            elephants.forEach(elephant => {
+                elephant.draw(program);
+            });
+            ec.drawShape(program, ground)
             requestAnimationFrame(renderLoop);
         }
 
@@ -76,52 +371,72 @@
                 const progressText = document.querySelector("#progress-text");
                 const size = (innerWidth < innerHeight) ? innerWidth : innerHeight;
                 // create canvas
-                const width = size;
-                const height = size;
+                const width = innerWidth;//size;
+                const height = innerHeight;//size;
                 ec = new EpicCanvas(width, height, "body");
 
                 // set clear color 
-                ec.clearColor = [0.2, 0.4, 0.5, 1.0];
+                ec.clearColor = [0.7,0.8, 1,1.0];
 
                 // setup the camera position, lookat center point, up vector.
-                ec.lookAt([0, 0, 5], [0, 0, 0], [0, 1, 0]);
-                ec.fieldOfView = Math.PI / 3;
+                ec.lookAt([0, 5, 5], [0, 0, 0], [0, 1, 0]);
+                ec.fieldOfView = Math.PI / 2.1
                 ec.aspectRatio = width / height;
 
                 // create shader program
                 program = ec.makeProgram(vsPhong, fsPhong);
 
                 // setup some lighting of 3 types
-                ec.ambientColor = [0.25, 0.25, 0.25];
+                ec.ambientColor = [0.5, 0.5, 0.5];
                 ec.directionalColor = [0.75, 0.75, 0.75];
-                ec.directionalVector = [-0.7, 0.7, 0]; // direction the light comes from, should be normalized
+                ec.directionalVector = [0,1, 0]; // direction the light comes from, should be normalized
 
-                const numbers = Array.from({ length: 10 }, (_, i) => (i + 1).toString().padStart(2, '0'));
+                const numbers = Array.from({ length: 10 }, (_, i) => (i + 1).toString().padStart(2, '00'));
                 const url = "https://raw.githubusercontent.com/paul-caron/eletrope/master/model/ee";
 
                 // Update log with initial loading state
                 progressText.textContent = "0/10";
                 progressBar.style.width = "0%";
 
-                const modelPromises = numbers.map((n, i) =>
+                const framePromises = numbers.map((n, i) =>
                     ec.loadSTL(url + n + ".STL").then(model => {
                         scaleToUnitSize(model);
                         rotateX(model, -Math.PI / 2);
-                        translateY(model, -0.4);
-                        setColor(model, [0.7,0.7,0.7,1.0])
+                        rotateY(model, Math.PI/2);
+                        setColor(model, [0.7,0.7,0.7,1.0]);
                         ec.reloadBufferData(model);
-                        // Store model at correct index
-                        models[i] = model;
                         // Update loaded count, progress bar, and text
                         loadedCount++;
                         progressText.textContent = `${loadedCount}/10`;
                         progressBar.style.width = `${(loadedCount / 10) * 100}%`;
+                        return model;
                     })
                 );
-                
-                await Promise.all(modelPromises);
-                // Optionally clear the log div after loading
+
+                const frames = await Promise.all(framePromises);
+
+                for(let i=0;i<30;i++){
+                    // Create elephant instance
+                    const elephant = new Elephant(frames);
+                    // Set initial positions spread out more
+                    elephant.setPosition([(Math.random()-0.5)*4, 0, (Math.random() - 0.5) * 4]); // Spread in X (-10 to 8), random Z
+                    // Optional: Different rotations
+                    elephant.setRotation(Math.random() * Math.PI * 2); // Random initial rotation
+                    const s = Math.random()/3+0.75;
+                    elephant.setScale([s, s, s]);
+                    elephant.size = s;
+                    elephants.push(elephant);
+                }
+
                 log.style.display = "none"; // Hide progress bar when done
+                
+                ground = Square(ec);
+                rotateX(ground, -Math.PI/2);
+                setColor(ground, [0.7,0.7,0.53,1])
+                scale(ground, 100,100,100)
+                ec.reloadBufferData(ground);
+                
+                
                 requestAnimationFrame(renderLoop);
                 
             } catch (e) {
